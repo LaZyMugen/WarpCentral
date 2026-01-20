@@ -134,6 +134,10 @@ func (d *Downloader) Download(ctx context.Context, rawURL, outPath string, onPro
 			}
 		}
 	}
+	if err := f.Sync(); err != nil {
+	return err
+}
+
 
 	// final progress (avg-ish)
 	elapsed := time.Since(start).Seconds()

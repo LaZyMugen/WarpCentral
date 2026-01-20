@@ -34,6 +34,11 @@ func formatSpeed(bps float64) string {
 	return fmt.Sprintf("%.2f MB/s", bps/(1024*1024))
 }
 
+func clearLine() {
+	// Clears current line by overwriting it with spaces
+	fmt.Printf("\r%-90s", "")
+}
+
 func main() {
 	if len(os.Args) < 3 {
 		fmt.Println("Usage:")
@@ -70,6 +75,8 @@ func main() {
 	fmt.Println("Starting download...")
 
 	err := dl.Download(ctx, rawURL, out, func(p downloader.Progress) {
+		clearLine()
+
 		if p.Total > 0 {
 			percent := float64(p.Downloaded) * 100 / float64(p.Total)
 			fmt.Printf("\r%s / %s (%.2f%%) | %s",
