@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -26,12 +27,13 @@ type Downloader struct {
 func New() *Downloader {
 	return &Downloader{
 		Client: &http.Client{
-			Timeout: 0,
+			Timeout: 0, // rely on context cancel
 		},
 	}
 }
 
 func (d *Downloader) Download(ctx context.Context, rawURL, outPath string, onProgress func(Progress)) error {
+	// Basic validation
 	if strings.TrimSpace(rawURL) == "" {
 		return errors.New("empty url")
 	}
@@ -40,6 +42,7 @@ func (d *Downloader) Download(ctx context.Context, rawURL, outPath string, onPro
 		return fmt.Errorf("invalid url: %w", err)
 	}
 
+	// Request
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return err
@@ -56,11 +59,13 @@ func (d *Downloader) Download(ctx context.Context, rawURL, outPath string, onPro
 		return fmt.Errorf("http error: %s", resp.Status)
 	}
 
+	// Output path
 	if outPath == "" {
 		outPath = guessFileName(resp, rawURL)
 	}
 	outPath = filepath.Clean(outPath)
 
+	// Create file
 	f, err := os.Create(outPath)
 	if err != nil {
 		return err
@@ -68,97 +73,102 @@ func (d *Downloader) Download(ctx context.Context, rawURL, outPath string, onPro
 	defer f.Close()
 
 	total := resp.ContentLength // -1 if unknown
+
+	// Shared progress counter (atomic because goroutine updates it)
 	var downloaded int64
 
-	start := time.Now()
-
-	// For speed calculation: bytes over last interval
-	lastTime := time.Now()
-	lastBytes := int64(0)
-
+	// Progress ticker
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
-	emitProgress := func() {
+	// Instant speed calculation state
+	lastTime := time.Now()
+	lastBytes := int64(0)
+
+	emit := func() {
 		now := time.Now()
 		dt := now.Sub(lastTime).Seconds()
 		if dt <= 0 {
 			return
 		}
-		delta := downloaded - lastBytes
+
+		cur := atomic.LoadInt64(&downloaded)
+		delta := cur - lastBytes
 		speed := float64(delta) / dt
 
 		lastTime = now
-		lastBytes = downloaded
+		lastBytes = cur
 
 		if onProgress != nil {
 			onProgress(Progress{
-				Downloaded: downloaded,
+				Downloaded: cur,
 				Total:      total,
 				SpeedBps:   speed,
 			})
 		}
 	}
 
-	// progress loop (NO goroutine needed)
-	buf := make([]byte, 1024*256)
-
-	downloadLoop:
-	for {
-		select {
-		case <-ctx.Done():
-	// If we already fully downloaded the file, consider it a success.
-	if total > 0 && downloaded >= total {
-		emitProgress()
-		return nil
-	}
-	emitProgress()
-	return ctx.Err()
-
-		case <-ticker.C:
-			emitProgress()
-		default:
-			n, readErr := resp.Body.Read(buf)
+	// Copy in background so the main goroutine can:
+	// - emit progress on a ticker
+	// - exit cleanly on completion
+	// - respond instantly to ctx cancel
+	errCh := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 256*1024) // 256KB
+		for {
+			n, rErr := resp.Body.Read(buf)
 			if n > 0 {
 				_, wErr := f.Write(buf[:n])
 				if wErr != nil {
-					return wErr
+					errCh <- wErr
+					return
 				}
-				downloaded += int64(n)
+				atomic.AddInt64(&downloaded, int64(n))
 			}
 
-			if readErr == io.EOF {
-				// finished reading; break out of the outer loop
-				break downloadLoop
+			if rErr == io.EOF {
+				// Flush file to disk
+				if syncErr := f.Sync(); syncErr != nil {
+					errCh <- syncErr
+					return
+				}
+				errCh <- nil
+				return
 			}
-			if readErr != nil {
-				return readErr
+
+			if rErr != nil {
+				errCh <- rErr
+				return
 			}
 		}
-	}
-	if err := f.Sync(); err != nil {
-	return err
-}
+	}()
 
+	// Control loop (no blocking reads here)
+	for {
+		select {
+		case <-ctx.Done():
+			// If already complete, don't treat it as a failure.
+			cur := atomic.LoadInt64(&downloaded)
+			if total > 0 && cur >= total {
+				emit()
+				return nil
+			}
+			emit()
+			return ctx.Err()
 
-	// final progress (avg-ish)
-	elapsed := time.Since(start).Seconds()
-	avgSpeed := float64(downloaded)
-	if elapsed > 0 {
-		avgSpeed = avgSpeed / elapsed
-	}
-	if onProgress != nil {
-		onProgress(Progress{
-			Downloaded: downloaded,
-			Total:      total,
-			SpeedBps:   avgSpeed,
-		})
-	}
+		case <-ticker.C:
+			emit()
 
-	return nil
+		case copyErr := <-errCh:
+			// One final emit before exiting
+			emit()
+			return copyErr
+		}
+	}
 }
 
 func guessFileName(resp *http.Response, rawURL string) string {
+	// Try Content-Disposition: filename=...
 	cd := resp.Header.Get("Content-Disposition")
 	if cd != "" {
 		lower := strings.ToLower(cd)
@@ -173,6 +183,7 @@ func guessFileName(resp *http.Response, rawURL string) string {
 		}
 	}
 
+	// Fallback to URL path base
 	u, err := url.Parse(rawURL)
 	if err == nil {
 		base := filepath.Base(u.Path)
