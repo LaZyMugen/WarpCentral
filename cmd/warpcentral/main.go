@@ -74,7 +74,15 @@ func main() {
 
 	fmt.Println("Starting download...")
 
+		var lastPrinted int64 = -1
+
 	err := dl.Download(ctx, rawURL, out, func(p downloader.Progress) {
+		// Avoid blinking: only print if downloaded bytes changed
+		if p.Downloaded == lastPrinted {
+			return
+		}
+		lastPrinted = p.Downloaded
+
 		clearLine()
 
 		if p.Total > 0 {
@@ -93,10 +101,12 @@ func main() {
 		}
 	})
 
+
 	if err != nil {
 		fmt.Println("\nFailed:", err)
 		return
 	}
+	clearLine()
 
 	fmt.Println("\nDone.")
 }
