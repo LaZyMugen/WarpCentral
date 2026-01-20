@@ -103,6 +103,7 @@ func (d *Downloader) Download(ctx context.Context, rawURL, outPath string, onPro
 	// progress loop (NO goroutine needed)
 	buf := make([]byte, 1024*256)
 
+	downloadLoop:
 	for {
 		select {
 		case <-ctx.Done():
@@ -127,7 +128,8 @@ func (d *Downloader) Download(ctx context.Context, rawURL, outPath string, onPro
 			}
 
 			if readErr == io.EOF {
-				break
+				// finished reading; break out of the outer loop
+				break downloadLoop
 			}
 			if readErr != nil {
 				return readErr
