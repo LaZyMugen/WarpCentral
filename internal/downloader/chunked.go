@@ -32,19 +32,51 @@ func defaultChunkedOptions() ChunkedOptions {
 func autoParts(total int64) int {
 	const mb = 1024 * 1024
 
-	switch {
-	case total <= 0:
+	// Aim: 8–16MB per chunk (good balance)
+	const targetChunkSize = 16 * mb
+	const minChunkSize = 2 * mb
+
+	if total <= 0 {
 		return 1
-	case total < 20*mb:
-		return 4
-	case total < 200*mb:
-		return 8
-	case total < 1024*mb:
-		return 16
-	default:
-		return 32
 	}
+
+	parts := int(total / targetChunkSize)
+	if total%targetChunkSize != 0 {
+		parts++
+	}
+
+	// Clamp parts range
+	if parts < 1 {
+		parts = 1
+	}
+	if parts > 32 {
+		parts = 32
+	}
+
+	// Ensure chunks aren't too small
+	// If parts make chunks smaller than minChunkSize, reduce parts.
+	for parts > 1 {
+		chunkSize := total / int64(parts)
+		if chunkSize >= minChunkSize {
+			break
+		}
+		parts--
+	}
+
+	return parts
 }
+
+func clampWorkers(parts int) int {
+	if parts <= 0 {
+		return 1
+	}
+	// hard cap for sanity
+	if parts > 12 {
+		return 12
+	}
+	return parts
+}
+
 
 
 func (d *Downloader) DownloadSmart(ctx context.Context, rawURL, outPath string, onProgress func(Progress)) error {
@@ -62,7 +94,7 @@ func (d *Downloader) DownloadSmart(ctx context.Context, rawURL, outPath string, 
 	// chunk download
 	opt := defaultChunkedOptions()
 	opt.Parts = autoParts(info.Size)
-	opt.WorkerCount = opt.Parts
+	opt.WorkerCount = clampWorkers(opt.Parts)
 	return d.downloadChunked(ctx, rawURL, outPath, info.Size, opt, onProgress)}
 
 func (d *Downloader) downloadChunked(
