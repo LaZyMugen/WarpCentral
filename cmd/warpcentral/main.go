@@ -76,7 +76,8 @@ func main() {
 
 		var lastPrinted int64 = -1
 
-	err := dl.Download(ctx, rawURL, out, func(p downloader.Progress) {
+	err := dl.DownloadSmart(ctx, rawURL, out, func(p downloader.Progress) {
+
 		// Avoid blinking: only print if downloaded bytes changed
 		if p.Downloaded == lastPrinted {
 			return
