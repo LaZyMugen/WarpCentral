@@ -1,10 +1,9 @@
 package downloader
 
-import "io"
-
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"github.com/LaZyMugen/warpcentral/internal/chunker"
+	"github.com/LaZyMugen/warpcentral/internal/resume"
 )
 
 type ChunkedOptions struct {
@@ -95,7 +95,8 @@ func (d *Downloader) DownloadSmart(ctx context.Context, rawURL, outPath string, 
 	opt := defaultChunkedOptions()
 	opt.Parts = autoParts(info.Size)
 	opt.WorkerCount = clampWorkers(opt.Parts)
-	return d.downloadChunked(ctx, rawURL, outPath, info.Size, opt, onProgress)}
+	return d.downloadChunked(ctx, rawURL, outPath, info.Size, opt, onProgress)
+}
 
 func (d *Downloader) downloadChunked(
 	ctx context.Context,
@@ -137,7 +138,31 @@ func (d *Downloader) downloadChunked(
 		return fmt.Errorf("failed to split into chunks")
 	}
 
+	// Build meta file
+	metaPath := resume.MetaPath(outPath)
+	meta := resume.Meta{
+		Version:   1,
+		URL:       rawURL,
+		OutPath:   outPath,
+		TotalSize: totalSize,
+		Parts:     opt.Parts,
+		Chunks:    make([]resume.ChunkState, 0, len(chunks)),
+	}
+
+	for _, c := range chunks {
+		meta.Chunks = append(meta.Chunks, resume.ChunkState{
+			ID:    c.ID,
+			Start: c.Start,
+			End:   c.End,
+			Done:  false,
+		})
+	}
+
+	// Save initial meta
+	_ = resume.Save(metaPath, meta)
+
 	var downloaded int64 // atomic
+	var metaMu sync.Mutex
 
 	// progress ticker
 	ticker := time.NewTicker(400 * time.Millisecond)
@@ -192,9 +217,22 @@ func (d *Downloader) downloadChunked(
 					return
 				}
 
-				n, e := d.downloadRangeIntoFile(ctx, rawURL, f, j.c.Start, j.c.End)
-				if e == nil {
+				_, e := d.downloadRangeIntoFile(ctx, rawURL, f, j.c.Start, j.c.End, func(n int64) {
 					atomic.AddInt64(&downloaded, n)
+				})
+				if e == nil {
+					// Mark chunk as done in meta and save
+					metaMu.Lock()
+					for i := range meta.Chunks {
+						if meta.Chunks[i].ID == j.c.ID {
+							meta.Chunks[i].Done = true
+							break
+						}
+					}
+					_ = resume.Save(metaPath, meta)
+					metaMu.Unlock()
+
+
 					lastErr = nil
 					break
 				}
@@ -268,7 +306,9 @@ func (d *Downloader) downloadRangeIntoFile(
 	rawURL string,
 	f *os.File,
 	start, end int64,
+	onBytes func(int64), // callback for realtime progress
 ) (int64, error) {
+
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
@@ -306,6 +346,9 @@ func (d *Downloader) downloadRangeIntoFile(
 			}
 			offset += int64(n)
 			writtenTotal += int64(n)
+			if onBytes != nil {
+				onBytes(int64(n))
+			}
 		}
 
 		if rErr == io.EOF {
