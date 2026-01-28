@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
@@ -13,7 +14,30 @@ import (
 
 	"github.com/LaZyMugen/warpcentral/internal/chunker"
 	"github.com/LaZyMugen/warpcentral/internal/resume"
+	"github.com/LaZyMugen/warpcentral/internal/storage"
 )
+
+type metaSaver struct {
+	lastSave time.Time
+	interval time.Duration
+}
+
+func newMetaSaver() *metaSaver {
+	return &metaSaver{
+		lastSave: time.Now(),
+		interval: time.Second,
+	}
+}
+
+func (m *metaSaver) shouldSave() bool {
+	return time.Since(m.lastSave) >= m.interval
+}
+
+func (m *metaSaver) markSaved() {
+	m.lastSave = time.Now()
+}
+
+
 
 type ChunkedOptions struct {
 	Parts       int
@@ -29,23 +53,22 @@ func defaultChunkedOptions() ChunkedOptions {
 	}
 }
 
+/* ---------- tuning ---------- */
+
 func autoParts(total int64) int {
 	const mb = 1024 * 1024
-
-	// Aim: 8–16MB per chunk (good balance)
-	const targetChunkSize = 16 * mb
-	const minChunkSize = 2 * mb
+	const target = 16 * mb
+	const min = 2 * mb
 
 	if total <= 0 {
 		return 1
 	}
 
-	parts := int(total / targetChunkSize)
-	if total%targetChunkSize != 0 {
+	parts := int(total / target)
+	if total%target != 0 {
 		parts++
 	}
 
-	// Clamp parts range
 	if parts < 1 {
 		parts = 1
 	}
@@ -53,11 +76,8 @@ func autoParts(total int64) int {
 		parts = 32
 	}
 
-	// Ensure chunks aren't too small
-	// If parts make chunks smaller than minChunkSize, reduce parts.
 	for parts > 1 {
-		chunkSize := total / int64(parts)
-		if chunkSize >= minChunkSize {
+		if total/int64(parts) >= min {
 			break
 		}
 		parts--
@@ -70,33 +90,52 @@ func clampWorkers(parts int) int {
 	if parts <= 0 {
 		return 1
 	}
-	// hard cap for sanity
 	if parts > 12 {
 		return 12
 	}
 	return parts
 }
 
-
-
-func (d *Downloader) DownloadSmart(ctx context.Context, rawURL, outPath string, onProgress func(Progress)) error {
-	info, err := d.Probe(ctx, rawURL)
+// guessFileNameFromURL picks a reasonable default filename from the URL path.
+// Used by the chunked path so it behaves like the single-stream downloader.
+func guessFileNameFromURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
 	if err != nil {
-		// If HEAD fails, fallback to single stream GET
+		return "download.bin"
+	}
+
+	name := filepath.Base(u.Path)
+	if name == "" || name == "." || name == "/" {
+		return "download.bin"
+	}
+	return name
+}
+
+/* ---------- public entry ---------- */
+
+func (d *Downloader) DownloadSmart(
+	ctx context.Context,
+	rawURL, outPath string,
+	onProgress func(Progress),
+) error {
+
+	info, err := d.Probe(ctx, rawURL)
+	if err != nil || info.Size <= 0 || !info.AcceptRanges {
 		return d.Download(ctx, rawURL, outPath, onProgress)
 	}
 
-	// If no size or no range support -> fallback
-	if info.Size <= 0 || !info.AcceptRanges {
-		return d.Download(ctx, rawURL, outPath, onProgress)
-	}
-
-	// chunk download
 	opt := defaultChunkedOptions()
 	opt.Parts = autoParts(info.Size)
 	opt.WorkerCount = clampWorkers(opt.Parts)
+
+	if outPath == "" {
+		outPath = guessFileNameFromURL(rawURL)
+	}
+
 	return d.downloadChunked(ctx, rawURL, outPath, info.Size, opt, onProgress)
 }
+
+/* ---------- chunked download ---------- */
 
 func (d *Downloader) downloadChunked(
 	ctx context.Context,
@@ -106,23 +145,8 @@ func (d *Downloader) downloadChunked(
 	opt ChunkedOptions,
 	onProgress func(Progress),
 ) error {
-	if opt.Parts <= 0 {
-		opt.Parts = 8
-	}
-	if opt.WorkerCount <= 0 {
-		opt.WorkerCount = opt.Parts
-	}
-	if opt.MaxRetries < 0 {
-		opt.MaxRetries = 0
-	}
-
-	// Guess output if not provided
-	if outPath == "" {
-		outPath = "download.bin"
-	}
 	outPath = filepath.Clean(outPath)
 
-	// Pre-allocate file
 	f, err := os.OpenFile(outPath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0644)
 	if err != nil {
 		return err
@@ -135,11 +159,13 @@ func (d *Downloader) downloadChunked(
 
 	chunks := chunker.Split(totalSize, opt.Parts)
 	if len(chunks) == 0 {
-		return fmt.Errorf("failed to split into chunks")
+		return fmt.Errorf("failed to split chunks")
 	}
 
-	// Build meta file
+	/* ---------- meta ---------- */
+
 	metaPath := resume.MetaPath(outPath)
+	metaSave := newMetaSaver()
 	meta := resume.Meta{
 		Version:   1,
 		URL:       rawURL,
@@ -151,20 +177,23 @@ func (d *Downloader) downloadChunked(
 
 	for _, c := range chunks {
 		meta.Chunks = append(meta.Chunks, resume.ChunkState{
-			ID:    c.ID,
-			Start: c.Start,
-			End:   c.End,
-			Done:  false,
+			ID:        c.ID,
+			Start:     c.Start,
+			End:       c.End,
+			DoneBytes: 0,
 		})
 	}
 
-	// Save initial meta
-	_ = resume.Save(metaPath, meta)
+	if metaSave.shouldSave() {
+		_ = resume.Save(metaPath, meta)
+		metaSave.markSaved()
+	}
 
-	var downloaded int64 // atomic
+	var downloaded int64
 	var metaMu sync.Mutex
 
-	// progress ticker
+	/* ---------- progress ---------- */
+
 	ticker := time.NewTicker(400 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -177,9 +206,9 @@ func (d *Downloader) downloadChunked(
 		if dt <= 0 {
 			return
 		}
+
 		cur := atomic.LoadInt64(&downloaded)
-		delta := cur - lastBytes
-		speed := float64(delta) / dt
+		speed := float64(cur-lastBytes) / dt
 
 		lastTime = now
 		lastBytes = cur
@@ -193,10 +222,9 @@ func (d *Downloader) downloadChunked(
 		}
 	}
 
-	// worker pool
-	type job struct {
-		c chunker.Chunk
-	}
+	/* ---------- workers ---------- */
+
+	type job struct{ c chunker.Chunk }
 
 	jobs := make(chan job)
 	errCh := make(chan error, 1)
@@ -210,29 +238,50 @@ func (d *Downloader) downloadChunked(
 		defer wg.Done()
 
 		for j := range jobs {
-			// retry loop per chunk
 			var lastErr error
+
 			for attempt := 0; attempt <= opt.MaxRetries; attempt++ {
 				if ctx.Err() != nil {
 					return
 				}
 
-				_, e := d.downloadRangeIntoFile(ctx, rawURL, f, j.c.Start, j.c.End, func(n int64) {
-					atomic.AddInt64(&downloaded, n)
-				})
-				if e == nil {
-					// Mark chunk as done in meta and save
-					metaMu.Lock()
-					for i := range meta.Chunks {
-						if meta.Chunks[i].ID == j.c.ID {
-							meta.Chunks[i].Done = true
-							break
-						}
+				/* find resume offset */
+				metaMu.Lock()
+				startOffset := j.c.Start
+				for _, mc := range meta.Chunks {
+					if mc.ID == j.c.ID {
+						startOffset = mc.Start + mc.DoneBytes
+						break
 					}
-					_ = resume.Save(metaPath, meta)
-					metaMu.Unlock()
+				}
+				metaMu.Unlock()
 
+				_, e := d.downloadRangeIntoFile(
+					ctx,
+					rawURL,
+					f,
+					j.c.Start,
+					j.c.End,
+					startOffset,
+					func(n int64) {
+						atomic.AddInt64(&downloaded, n)
 
+						metaMu.Lock()
+						for i := range meta.Chunks {
+							if meta.Chunks[i].ID == j.c.ID {
+								meta.Chunks[i].DoneBytes += n
+								break
+							}
+						}
+						if metaSave.shouldSave() {
+							_ = resume.Save(metaPath, meta)
+							metaSave.markSaved()
+						}
+						metaMu.Unlock()
+					},
+				)
+
+				if e == nil {
 					lastErr = nil
 					break
 				}
@@ -255,7 +304,6 @@ func (d *Downloader) downloadChunked(
 		go worker()
 	}
 
-	// feed jobs
 	go func() {
 		defer close(jobs)
 		for _, c := range chunks {
@@ -267,7 +315,6 @@ func (d *Downloader) downloadChunked(
 		}
 	}()
 
-	// control loop
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()
@@ -278,7 +325,6 @@ func (d *Downloader) downloadChunked(
 		select {
 		case <-ctx.Done():
 			emit()
-			// If cancellation was due to error, errCh handles it.
 			select {
 			case e := <-errCh:
 				return e
@@ -296,26 +342,39 @@ func (d *Downloader) downloadChunked(
 		case <-done:
 			emit()
 			_ = f.Sync()
+
+			// Final checksum + meta update (best-effort)
+			checksum, err := storage.SHA256(outPath)
+			if err == nil {
+				metaMu.Lock()
+				meta.Checksum = checksum
+				_ = resume.Save(metaPath, meta)
+				metaMu.Unlock()
+			}
+
 			return nil
 		}
 	}
 }
 
+/* ---------- range download ---------- */
+
 func (d *Downloader) downloadRangeIntoFile(
 	ctx context.Context,
 	rawURL string,
 	f *os.File,
-	start, end int64,
-	onBytes func(int64), // callback for realtime progress
+	start int64,
+	end int64,
+	startOffset int64,
+	onBytes func(int64),
 ) (int64, error) {
-
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return 0, err
 	}
 	req.Header.Set("User-Agent", "WarpCentral/0.1")
-	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", startOffset, end))
 
 	resp, err := d.Client.Do(req)
 	if err != nil {
@@ -323,29 +382,28 @@ func (d *Downloader) downloadRangeIntoFile(
 	}
 	defer resp.Body.Close()
 
-	// For range requests, servers should respond 206 Partial Content.
-	// Some servers may respond 200 (bad range support). Treat that as failure here.
 	if resp.StatusCode != http.StatusPartialContent {
 		return 0, fmt.Errorf("range request failed: %s", resp.Status)
 	}
 
-	// WriteAt loop
 	buf := make([]byte, 256*1024)
-	var writtenTotal int64 = 0
+	var written int64
+	offset := startOffset
 
-	offset := start
 	for {
 		n, rErr := resp.Body.Read(buf)
 		if n > 0 {
 			w, wErr := f.WriteAt(buf[:n], offset)
 			if wErr != nil {
-				return writtenTotal, wErr
+				return written, wErr
 			}
 			if w != n {
-				return writtenTotal, fmt.Errorf("short write: wrote %d expected %d", w, n)
+				return written, fmt.Errorf("short write")
 			}
+
 			offset += int64(n)
-			writtenTotal += int64(n)
+			written += int64(n)
+
 			if onBytes != nil {
 				onBytes(int64(n))
 			}
@@ -355,15 +413,14 @@ func (d *Downloader) downloadRangeIntoFile(
 			break
 		}
 		if rErr != nil {
-			return writtenTotal, rErr
+			return written, rErr
 		}
 	}
 
-	// sanity: should match requested length
-	expected := (end - start) + 1
-	if writtenTotal != expected {
-		return writtenTotal, fmt.Errorf("chunk size mismatch: got %d expected %d", writtenTotal, expected)
+	expected := (end - startOffset) + 1
+	if written != expected {
+		return written, fmt.Errorf("chunk mismatch: got %d expected %d", written, expected)
 	}
 
-	return writtenTotal, nil
+	return written, nil
 }

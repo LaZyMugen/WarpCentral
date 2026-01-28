@@ -9,14 +9,15 @@
       "id": 0,
       "start": 0,
       "end": 10828971,
-      "done": true
+      "doneBytes": 10828972
     },
     {
       "id": 1,
       "start": 10828972,
       "end": 21657942,
-      "done": true
+      "doneBytes": 10828971
     }
   ],
-  "updatedAt": "2026-01-24T12:13:57+05:30"
+  "checksum": "500afe4eeb535c5ecd1c205e18be8c3db97dce216088e57fdad8e08a3a4028c3",
+  "updatedAt": "2026-01-27T23:30:40+05:30"
 }

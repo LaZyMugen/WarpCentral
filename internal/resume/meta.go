@@ -8,11 +8,12 @@ import (
 )
 
 type ChunkState struct {
-	ID    int   `json:"id"`
-	Start int64 `json:"start"`
-	End   int64 `json:"end"`
-	Done  bool  `json:"done"`
+	ID        int   `json:"id"`
+	Start     int64 `json:"start"`
+	End       int64 `json:"end"`
+	DoneBytes int64 `json:"doneBytes"`
 }
+
 
 type Meta struct {
 	Version   int          `json:"version"`
@@ -21,6 +22,7 @@ type Meta struct {
 	TotalSize int64        `json:"totalSize"`
 	Parts     int          `json:"parts"`
 	Chunks    []ChunkState `json:"chunks"`
+	Checksum  string       `json:"checksum"`
 	UpdatedAt string       `json:"updatedAt"`
 }
 
