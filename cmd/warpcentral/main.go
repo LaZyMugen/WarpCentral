@@ -10,6 +10,9 @@ import (
 
 	"github.com/LaZyMugen/warpcentral/internal/downloader"
 	qstore "github.com/LaZyMugen/warpcentral/internal/queue"
+
+		tea "github.com/charmbracelet/bubbletea"
+	"github.com/LaZyMugen/warpcentral/internal/tui"
 )
 
 func formatBytes(n int64) string {
@@ -45,6 +48,8 @@ func usage() {
 	fmt.Println("  warpcentral resume <meta-file>")
 	fmt.Println("  warpcentral queue add <url> [output_file]")
 	fmt.Println("  warpcentral queue run")
+	fmt.Println("  warpcentral tui")
+
 }
 
 func main() {
@@ -174,6 +179,14 @@ func main() {
 			fmt.Println("Unknown queue subcommand:", sub)
 			usage()
 		}
+
+	case "tui":
+	p := tea.NewProgram(tui.New())
+	if err := p.Start(); err != nil {
+		fmt.Println("Error starting TUI:", err)
+		os.Exit(1)
+	}
+
 
 	default:
 		fmt.Println("Unknown command:", cmd)
