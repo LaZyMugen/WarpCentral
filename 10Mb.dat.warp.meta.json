@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "url": "https://proof.ovh.net/files/10Mb.dat",
+  "outPath": "10Mb.dat",
+  "totalSize": 10485760,
+  "parts": 1,
+  "chunks": [
+    {
+      "id": 0,
+      "start": 0,
+      "end": 10485759,
+      "doneBytes": 10485760
+    }
+  ],
+  "checksum": "4670af0752b0ee0a571c17eb6923b722e9c557cd26e6b9ec25c2155098f3dc62",
+  "updatedAt": "2026-01-30T18:31:22+05:30"
+}
