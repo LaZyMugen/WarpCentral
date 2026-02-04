@@ -83,6 +83,8 @@ func (d *Downloader) ResumeFromMeta(ctx context.Context, metaPath string, onProg
 
 	if alreadyDone >= m.TotalSize || len(chunks) == 0 {
 		// everything is already complete
+		m.Status = "done"
+		_ = resume.Save(metaPath, m)
 		if onProgress != nil {
 			onProgress(Progress{
 				Downloaded: m.TotalSize,
@@ -101,6 +103,12 @@ func (d *Downloader) ResumeFromMeta(ctx context.Context, metaPath string, onProg
 	// Start progress from bytes already done
 	var downloaded int64 = alreadyDone
 	var metaMu sync.Mutex
+
+	// Mark job as active when resuming work.
+	metaMu.Lock()
+	m.Status = "active"
+	_ = resume.Save(metaPath, m)
+	metaMu.Unlock()
 
 	// Progress ticker
 	ticker := time.NewTicker(400 * time.Millisecond)
@@ -223,6 +231,14 @@ func (d *Downloader) ResumeFromMeta(ctx context.Context, metaPath string, onProg
 		select {
 		case <-ctx.Done():
 			emit()
+			// On cancellation, mark as paused if not yet complete.
+			metaMu.Lock()
+			cur := atomic.LoadInt64(&downloaded)
+			if cur < m.TotalSize {
+				m.Status = "paused"
+				_ = resume.Save(metaPath, m)
+			}
+			metaMu.Unlock()
 			select {
 			case e := <-errCh:
 				return e
@@ -235,6 +251,14 @@ func (d *Downloader) ResumeFromMeta(ctx context.Context, metaPath string, onProg
 
 		case e := <-errCh:
 			emit()
+			// On worker error, treat as paused so it can be resumed.
+			metaMu.Lock()
+			cur := atomic.LoadInt64(&downloaded)
+			if cur < m.TotalSize {
+				m.Status = "paused"
+				_ = resume.Save(metaPath, m)
+			}
+			metaMu.Unlock()
 			return e
 
 		case <-done:
@@ -246,6 +270,7 @@ func (d *Downloader) ResumeFromMeta(ctx context.Context, metaPath string, onProg
 			if err == nil {
 				metaMu.Lock()
 				m.Checksum = checksum
+				m.Status = "done"
 				_ = resume.Save(metaPath, m)
 				metaMu.Unlock()
 			}

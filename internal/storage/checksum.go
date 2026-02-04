@@ -47,25 +47,30 @@ func LoadJobs() ([]Job, error) {
 			continue
 		}
 
-		var totalDone int64
-		for _, c := range m.Chunks {
-			length := (c.End - c.Start + 1)
-			done := c.DoneBytes
-			if done > length {
-				done = length
+		// Prefer orchestrator-owned status from meta, but fall back
+		// to a heuristic for older meta files that don't have it yet.
+		status := m.Status
+		if status == "" {
+			var totalDone int64
+			for _, c := range m.Chunks {
+				length := (c.End - c.Start + 1)
+				done := c.DoneBytes
+				if done > length {
+					done = length
+				}
+				totalDone += done
 			}
-			totalDone += done
-		}
 
-		status := "queued"
-		if m.TotalSize > 0 {
-			switch {
-			case totalDone >= m.TotalSize:
-				status = "done"
-			case totalDone == 0:
-				status = "queued"
-			default:
-				status = "paused"
+			status = "queued"
+			if m.TotalSize > 0 {
+				switch {
+				case totalDone >= m.TotalSize:
+					status = "done"
+				case totalDone == 0:
+					status = "queued"
+				default:
+					status = "paused"
+				}
 			}
 		}
 

@@ -173,6 +173,7 @@ func (d *Downloader) downloadChunked(
 		TotalSize: totalSize,
 		Parts:     opt.Parts,
 		Chunks:    make([]resume.ChunkState, 0, len(chunks)),
+		Status:    "active",
 	}
 
 	for _, c := range chunks {
@@ -325,6 +326,15 @@ func (d *Downloader) downloadChunked(
 		select {
 		case <-ctx.Done():
 			emit()
+
+			// Mark job as paused (interrupted) if not yet complete.
+			metaMu.Lock()
+			cur := atomic.LoadInt64(&downloaded)
+			if cur < totalSize {
+				meta.Status = "paused"
+				_ = resume.Save(metaPath, meta)
+			}
+			metaMu.Unlock()
 			select {
 			case e := <-errCh:
 				return e
@@ -337,6 +347,16 @@ func (d *Downloader) downloadChunked(
 
 		case e := <-errCh:
 			emit()
+
+			// On error, treat job as paused so it can be resumed.
+			metaMu.Lock()
+			cur := atomic.LoadInt64(&downloaded)
+			if cur < totalSize {
+				meta.Status = "paused"
+				_ = resume.Save(metaPath, meta)
+			}
+			metaMu.Unlock()
+
 			return e
 
 		case <-done:
@@ -348,6 +368,7 @@ func (d *Downloader) downloadChunked(
 			if err == nil {
 				metaMu.Lock()
 				meta.Checksum = checksum
+				meta.Status = "done"
 				_ = resume.Save(metaPath, meta)
 				metaMu.Unlock()
 			}

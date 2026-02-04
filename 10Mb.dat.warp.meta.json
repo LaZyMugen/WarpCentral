@@ -9,9 +9,10 @@
       "id": 0,
       "start": 0,
       "end": 10485759,
-      "doneBytes": 10485760
+      "doneBytes": 2703073
     }
   ],
-  "checksum": "4670af0752b0ee0a571c17eb6923b722e9c557cd26e6b9ec25c2155098f3dc62",
-  "updatedAt": "2026-01-30T18:31:22+05:30"
+  "checksum": "",
+  "updatedAt": "2026-02-05T00:08:54+05:30",
+  "status": "paused"
 }

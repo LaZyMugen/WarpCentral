@@ -24,6 +24,10 @@ type Meta struct {
 	Chunks    []ChunkState `json:"chunks"`
 	Checksum  string       `json:"checksum"`
 	UpdatedAt string       `json:"updatedAt"`
+	// Status is the orchestrator-owned lifecycle state for this job.
+	// It is intentionally a simple string to avoid coupling with the TUI.
+	// Expected values: "queued", "active", "paused", "done", "failed".
+	Status string `json:"status,omitempty"`
 }
 
 func MetaPath(outPath string) string {
