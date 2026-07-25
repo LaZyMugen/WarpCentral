@@ -9,19 +9,19 @@ import (
 )
 
 var (
-	// Programmer Neon Palette (Pink/Purple/Cyan/Emerald on Dark Slate)
+	// Programmer Soft Neon Palette
 	rosePink     = lipgloss.Color("#f43f5e") // Soft Neon Pink
 	purpleAccent = lipgloss.Color("#c084fc") // Lavender Purple
 	cyanAccent   = lipgloss.Color("#38bdf8") // Sky Cyan
-	greenAccent  = lipgloss.Color("#22c55e") // Programmer Green
-	grayColor    = lipgloss.Color("#71717a") // Muted Slate Gray
+	greenAccent  = lipgloss.Color("#22c55e") // Programmer Emerald Green
+	grayColor    = lipgloss.Color("#64748b") // Slate Gray
 	darkBorder   = lipgloss.Color("#334155") // Structural Border
 
-	roseStyle    = lipgloss.NewStyle().Foreground(rosePink).Bold(true)
-	purpleStyle  = lipgloss.NewStyle().Foreground(purpleAccent).Bold(true)
-	cyanStyle    = lipgloss.NewStyle().Foreground(cyanAccent).Bold(true)
-	greenStyle   = lipgloss.NewStyle().Foreground(greenAccent).Bold(true)
-	grayStyle    = lipgloss.NewStyle().Foreground(grayColor)
+	roseStyle   = lipgloss.NewStyle().Foreground(rosePink).Bold(true)
+	purpleStyle = lipgloss.NewStyle().Foreground(purpleAccent).Bold(true)
+	cyanStyle   = lipgloss.NewStyle().Foreground(cyanAccent).Bold(true)
+	greenStyle  = lipgloss.NewStyle().Foreground(greenAccent).Bold(true)
+	grayStyle   = lipgloss.NewStyle().Foreground(grayColor)
 )
 
 // RenderBtopBox draws a btop-style box with title embedded directly into top border.
@@ -101,6 +101,25 @@ func RenderBtopBox(leftTitle, rightTitle string, content string, width, height i
 	return lipgloss.JoinVertical(lipgloss.Left, topBorder, strings.Join(wrappedLines, "\n"), bottomBorder)
 }
 
+// renderEnergyProgressBar draws green slanted energy bars (▰▰▰▰▱▱▱) for completion progress
+func renderEnergyProgressBar(progress float64, barWidth int) string {
+	if barWidth < 4 {
+		barWidth = 4
+	}
+	filled := int(progress * float64(barWidth))
+	if filled > barWidth {
+		filled = barWidth
+	}
+	empty := barWidth - filled
+	if empty < 0 {
+		empty = 0
+	}
+
+	filledBars := greenStyle.Render(strings.Repeat("▰", filled))
+	emptyBars := grayStyle.Render(strings.Repeat("▱", empty))
+	return filledBars + emptyBars
+}
+
 func formatBytes(n int64) string {
 	const unit = 1024
 	if n < unit {
@@ -120,8 +139,8 @@ func (m Model) View() string {
 	}
 
 	w := m.width
-	if w < 90 {
-		w = 90
+	if w < 95 {
+		w = 95
 	}
 	h := m.height
 	if h < 24 {
@@ -214,56 +233,144 @@ func renderLogPanel(logs []daemon.LogEntry, width, height int) string {
 func renderNetworkPanel(st DaemonState, width, height int) string {
 	curSpeedMB := st.TotalSpeedBps / (1024 * 1024)
 	topSpeedMB := st.TopSpeedBps / (1024 * 1024)
+	curMbps := (st.TotalSpeedBps * 8) / (1024 * 1024)
+	topMbps := (st.TopSpeedBps * 8) / (1024 * 1024)
 
-	header := fmt.Sprintf("▼ %s\nTop: %.2f MB/s\nTotal: %.1f MB",
-		roseStyle.Render(fmt.Sprintf("%.2f MB/s", curSpeedMB)),
+	// Inner Stats Card (Left Side)
+	cardWidth := 19
+	cardHeight := height - 2
+	cardBoxStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(darkBorder).
+		Padding(0, 0)
+
+	cardContent := fmt.Sprintf(
+		" %s\n %s\n\n Top: %.2f\n %s\n\n Total: %.1f MB",
+		roseStyle.Render(fmt.Sprintf("▼ %.2f MB/s", curSpeedMB)),
+		grayStyle.Render(fmt.Sprintf("(%.0f Mbps)", curMbps)),
 		topSpeedMB,
+		grayStyle.Render(fmt.Sprintf("(%.0f Mbps)", topMbps)),
 		st.TotalSessionMB,
 	)
+	statsCard := cardBoxStyle.Width(cardWidth).Height(cardHeight).Render(cardContent)
 
-	bars := []string{" ", "▂", "▃", "▄", "▅", "▆", "▇", "█"}
-	hist := st.SpeedHistory
-	if len(hist) == 0 {
-		hist = make([]float64, 15)
+	// Multi-Line Graph Canvas (Right Side)
+	graphWidth := width - cardWidth - 14
+	if graphWidth < 6 {
+		graphWidth = 6
+	}
+	graphHeight := height - 2
+	if graphHeight < 4 {
+		graphHeight = 4
 	}
 
-	chartWidth := width - 20
-	if chartWidth < 5 {
-		chartWidth = 5
-	}
-
-	if len(hist) > chartWidth {
-		hist = hist[len(hist)-chartWidth:]
-	}
-
-	var graphBars []string
 	maxVal := topSpeedMB
 	if maxVal <= 0 {
 		maxVal = 1.0
 	}
 
-	for _, v := range hist {
-		vMB := v / (1024 * 1024)
-		idx := int((vMB / maxVal) * float64(len(bars)-1))
-		if idx < 0 {
-			idx = 0
+	graphStr := renderMultiLineGraph(st.SpeedHistory, graphWidth, graphHeight, maxVal)
+
+	// Y-Axis Scale Labels (Far Right Column)
+	var scaleLines []string
+	step := maxVal / float64(graphHeight-1)
+	for i := 0; i < graphHeight; i++ {
+		val := maxVal - (float64(i) * step)
+		if val < 0 {
+			val = 0
 		}
-		if idx >= len(bars) {
-			idx = len(bars) - 1
+		if i == graphHeight-1 {
+			scaleLines = append(scaleLines, grayStyle.Render("    0 MB/s"))
+		} else {
+			scaleLines = append(scaleLines, grayStyle.Render(fmt.Sprintf("%5.1f MB/s", val)))
 		}
-		graphBars = append(graphBars, roseStyle.Render(bars[idx]))
 	}
+	scaleCol := strings.Join(scaleLines, "\n")
 
-	chartStr := strings.Join(graphBars, "")
-	rightContent := fmt.Sprintf("%.1f MB/s\n%s\n0 MB/s", maxVal, chartStr)
-
-	row := lipgloss.JoinHorizontal(lipgloss.Top,
-		lipgloss.NewStyle().Width(16).Render(header),
-		lipgloss.NewStyle().Render(rightContent),
+	graphRow := lipgloss.JoinHorizontal(lipgloss.Top,
+		statsCard,
+		" ",
+		graphStr,
+		" ",
+		scaleCol,
 	)
 
 	title := lipgloss.NewStyle().Foreground(purpleAccent).Bold(true).Render(" Network Activity ")
-	return RenderBtopBox(title, "", row, width, height, darkBorder)
+	return RenderBtopBox(title, "", graphRow, width, height, darkBorder)
+}
+
+func renderMultiLineGraph(data []float64, width, height int, maxVal float64) string {
+	if width < 1 || height < 1 {
+		return ""
+	}
+
+	grid := make([][]string, height)
+	for y := 0; y < height; y++ {
+		grid[y] = make([]string, width)
+		for x := 0; x < width; x++ {
+			if y == height-1 {
+				grid[y][x] = grayStyle.Render("─")
+			} else if y%2 == 0 {
+				grid[y][x] = grayStyle.Render("┄")
+			} else {
+				grid[y][x] = " "
+			}
+		}
+	}
+
+	blocks := []string{" ", " ", "▂", "▃", "▄", "▅", "▆", "▇", "█"}
+	totalSubBlocks := float64(height * 8)
+
+	colors := []lipgloss.Color{
+		lipgloss.Color("#8b5cf6"), // Deep Purple
+		lipgloss.Color("#c084fc"), // Lavender
+		lipgloss.Color("#f43f5e"), // Neon Rose/Pink
+	}
+
+	// Align history data to fill graph width
+	hist := data
+	if len(hist) > width {
+		hist = hist[len(hist)-width:]
+	}
+
+	for x := 0; x < width && x < len(hist); x++ {
+		val := hist[x]
+		if val <= 0 {
+			continue
+		}
+		valMB := val / (1024 * 1024)
+		pct := valMB / maxVal
+		if pct > 1.0 {
+			pct = 1.0
+		}
+
+		subBlocksToDraw := int(pct * totalSubBlocks)
+
+		for y := height - 1; y >= 0; y-- {
+			rowFromBottom := (height - 1) - y
+			rowSubBlocks := subBlocksToDraw - (rowFromBottom * 8)
+			if rowSubBlocks <= 0 {
+				break
+			}
+			if rowSubBlocks > 8 {
+				rowSubBlocks = 8
+			}
+
+			colorIdx := (rowFromBottom * len(colors)) / height
+			if colorIdx >= len(colors) {
+				colorIdx = len(colors) - 1
+			}
+			blockStyle := lipgloss.NewStyle().Foreground(colors[colorIdx])
+			grid[y][x] = blockStyle.Render(blocks[rowSubBlocks])
+		}
+	}
+
+	var lines []string
+	for y := 0; y < height; y++ {
+		lines = append(lines, strings.Join(grid[y], ""))
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 func renderDownloadsPanel(m Model, width, height int) string {
@@ -329,9 +436,11 @@ func renderDownloadsPanel(m Model, width, height int) string {
 		name := job.Name
 
 		line1 := itemStyle.Render(fmt.Sprintf("%s%s", cursor, name))
-		line2 := fmt.Sprintf("   %s %s • %d%% • %s • %s / %s",
+		energyBar := renderEnergyProgressBar(job.Progress, 12)
+		line2 := fmt.Sprintf("   %s %s • [%s] %d%% • %s • %s / %s",
 			icon,
 			statusStyle.Render(string(job.Status)),
+			energyBar,
 			percent,
 			job.Speed,
 			formatBytes(job.Downloaded),
@@ -384,17 +493,9 @@ func renderFileDetails(j *Job, width, height int) string {
 	if barWidth < 8 {
 		barWidth = 8
 	}
-	filled := int(j.Progress * float64(barWidth))
-	if filled > barWidth {
-		filled = barWidth
-	}
-	empty := barWidth - filled
-	if empty < 0 {
-		empty = 0
-	}
 
-	bar := roseStyle.Render(strings.Repeat("█", filled)) + grayStyle.Render(strings.Repeat("░", empty))
-	progressLine := fmt.Sprintf("Progress: [%s] %d%%", bar, int(j.Progress*100))
+	energyBar := renderEnergyProgressBar(j.Progress, barWidth)
+	progressLine := fmt.Sprintf("Progress: [%s] %d%%", energyBar, int(j.Progress*100))
 
 	metaText := fmt.Sprintf(
 		"URL:  %s\nFile: %s\nPath: %s\nID:   %s",
@@ -485,4 +586,12 @@ func truncate(s string, max int) string {
 		return s[:max-3] + "..."
 	}
 	return s
+}
+
+func truncateANSI(s string, max int) string {
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return string(runes[:max])
 }
