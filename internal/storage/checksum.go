@@ -75,7 +75,9 @@ func LoadJobs() ([]Job, error) {
 		}
 
 		jobs = append(jobs, Job{
-			ID:       m.OutPath,
+			// Use the meta file path as the job ID so
+			// the TUI can pass it directly to `warpcentral resume <meta-file>`.
+			ID:       metaPath,
 			MetaPath: metaPath,
 			Status:   status,
 		})

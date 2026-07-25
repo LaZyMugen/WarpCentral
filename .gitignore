@@ -1,0 +1,16 @@
+# Binaries
+*.exe
+warpcentral
+warpcentrald
+
+# Test and downloaded data files
+*.dat
+*.bin
+*.mp4
+*.zip
+*.warp.meta.json
+*.queue.json
+warpcentral.queue.json
+
+# Temporary files
+*.tmp

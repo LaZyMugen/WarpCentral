@@ -96,9 +96,8 @@ func clampWorkers(parts int) int {
 	return parts
 }
 
-// guessFileNameFromURL picks a reasonable default filename from the URL path.
-// Used by the chunked path so it behaves like the single-stream downloader.
-func guessFileNameFromURL(rawURL string) string {
+// GuessFileNameFromURL picks a reasonable default filename from the URL path.
+func GuessFileNameFromURL(rawURL string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return "download.bin"
@@ -129,7 +128,7 @@ func (d *Downloader) DownloadSmart(
 	opt.WorkerCount = clampWorkers(opt.Parts)
 
 	if outPath == "" {
-		outPath = guessFileNameFromURL(rawURL)
+		outPath = GuessFileNameFromURL(rawURL)
 	}
 
 	return d.downloadChunked(ctx, rawURL, outPath, info.Size, opt, onProgress)
@@ -182,6 +181,7 @@ func (d *Downloader) downloadChunked(
 			Start:     c.Start,
 			End:       c.End,
 			DoneBytes: 0,
+			Status:    "pending",
 		})
 	}
 
@@ -249,9 +249,10 @@ func (d *Downloader) downloadChunked(
 				/* find resume offset */
 				metaMu.Lock()
 				startOffset := j.c.Start
-				for _, mc := range meta.Chunks {
-					if mc.ID == j.c.ID {
-						startOffset = mc.Start + mc.DoneBytes
+				for i := range meta.Chunks {
+					if meta.Chunks[i].ID == j.c.ID {
+						startOffset = meta.Chunks[i].Start + meta.Chunks[i].DoneBytes
+						meta.Chunks[i].Status = "downloading"
 						break
 					}
 				}
@@ -284,6 +285,15 @@ func (d *Downloader) downloadChunked(
 
 				if e == nil {
 					lastErr = nil
+					metaMu.Lock()
+					for i := range meta.Chunks {
+						if meta.Chunks[i].ID == j.c.ID {
+							meta.Chunks[i].Status = "completed"
+							break
+						}
+					}
+					_ = resume.Save(metaPath, meta)
+					metaMu.Unlock()
 					break
 				}
 				lastErr = e

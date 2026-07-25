@@ -8,10 +8,11 @@ import (
 )
 
 type ChunkState struct {
-	ID        int   `json:"id"`
-	Start     int64 `json:"start"`
-	End       int64 `json:"end"`
-	DoneBytes int64 `json:"doneBytes"`
+	ID        int    `json:"id"`
+	Start     int64  `json:"start"`
+	End       int64  `json:"end"`
+	DoneBytes int64  `json:"doneBytes"`
+	Status    string `json:"status,omitempty"` // "pending", "downloading", "completed"
 }
 
 
@@ -28,6 +29,9 @@ type Meta struct {
 	// It is intentionally a simple string to avoid coupling with the TUI.
 	// Expected values: "queued", "active", "paused", "done", "failed".
 	Status string `json:"status,omitempty"`
+	// Error holds an optional human-readable error message when Status
+	// is set to "failed".
+	Error string `json:"error,omitempty"`
 }
 
 func MetaPath(outPath string) string {

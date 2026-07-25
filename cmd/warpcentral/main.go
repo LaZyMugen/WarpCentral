@@ -5,13 +5,15 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/LaZyMugen/warpcentral/internal/daemon"
 	"github.com/LaZyMugen/warpcentral/internal/downloader"
 	qstore "github.com/LaZyMugen/warpcentral/internal/queue"
-
-		tea "github.com/charmbracelet/bubbletea"
 	"github.com/LaZyMugen/warpcentral/internal/tui"
 )
 
@@ -43,13 +45,16 @@ func clearLine() {
 }
 
 func usage() {
+	fmt.Println("WarpCentral Download Manager (SurgeDM-inspired Engine & TUI)")
+	fmt.Println()
 	fmt.Println("Usage:")
-	fmt.Println("  warpcentral download <url> [output_file]")
-	fmt.Println("  warpcentral resume <meta-file>")
-	fmt.Println("  warpcentral queue add <url> [output_file]")
-	fmt.Println("  warpcentral queue run")
-	fmt.Println("  warpcentral tui")
-
+	fmt.Println("  warpcentral daemon [--port 1700]            Start background daemon engine server")
+	fmt.Println("  warpcentral tui                             Launch interactive Surge-style TUI dashboard")
+	fmt.Println("  warpcentral download <url> [output_file]    Download file directly via CLI engine")
+	fmt.Println("  warpcentral resume <meta-file>             Resume download from meta file")
+	fmt.Println("  warpcentral queue add <url> [output_file]   Add URL to persistent queue")
+	fmt.Println("  warpcentral queue run                       Process queued downloads sequentially")
+	fmt.Println()
 }
 
 func main() {
@@ -68,7 +73,6 @@ func main() {
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		fmt.Println("\nStopping...")
 		cancel()
 	}()
 
@@ -101,6 +105,37 @@ func main() {
 	}
 
 	switch cmd {
+	case "daemon":
+		port := 1700
+		if len(os.Args) >= 3 {
+			if os.Args[2] == "--port" && len(os.Args) >= 4 {
+				p, err := strconv.Atoi(os.Args[3])
+				if err == nil && p > 0 {
+					port = p
+				}
+			}
+		}
+		srv := daemon.New(port)
+		if err := srv.Start(); err != nil {
+			fmt.Printf("Daemon server error: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "tui":
+		port := 1700
+		// Auto-start daemon in background if not already running
+		go func() {
+			srv := daemon.New(port)
+			_ = srv.Start()
+		}()
+		time.Sleep(100 * time.Millisecond)
+
+		p := tea.NewProgram(tui.NewWithPort(port), tea.WithAltScreen())
+		if _, err := p.Run(); err != nil {
+			fmt.Println("Error starting TUI:", err)
+			os.Exit(1)
+		}
+
 	case "download":
 		if len(os.Args) < 3 {
 			usage()
@@ -180,22 +215,12 @@ func main() {
 			usage()
 		}
 
-	case "tui":
-	p := tea.NewProgram(tui.New())
-	if err := p.Start(); err != nil {
-		fmt.Println("Error starting TUI:", err)
-		os.Exit(1)
-	}
-
-
 	default:
 		fmt.Println("Unknown command:", cmd)
 		usage()
 	}
 }
 
-// runQueue processes all pending items in the persistent queue file
-// sequentially using the chunked downloader.
 func runQueue(ctx context.Context, dl *downloader.Downloader, queuePath string, onProgress func(downloader.Progress)) error {
 	for {
 		q, err := qstore.Load(queuePath)
@@ -203,7 +228,6 @@ func runQueue(ctx context.Context, dl *downloader.Downloader, queuePath string, 
 			return err
 		}
 
-		// Find next item to run: prefer pending; if none, treat any in_progress as pending.
 		idx := -1
 		for i := range q.Items {
 			if q.Items[i].Status == qstore.StatusPending {
@@ -221,7 +245,6 @@ func runQueue(ctx context.Context, dl *downloader.Downloader, queuePath string, 
 		}
 
 		if idx == -1 {
-			// nothing left to do
 			return nil
 		}
 
@@ -235,7 +258,6 @@ func runQueue(ctx context.Context, dl *downloader.Downloader, queuePath string, 
 		out := item.OutPath
 		fmt.Println("\nStarting queued download:", item.URL, "->", out)
 
-		// Run the download; DownloadSmart will choose single/ranged.
 		perItemProgress := func(p downloader.Progress) {
 			if onProgress != nil {
 				onProgress(p)
@@ -255,7 +277,6 @@ func runQueue(ctx context.Context, dl *downloader.Downloader, queuePath string, 
 			return saveErr
 		}
 
-		// If context was cancelled, stop processing further items.
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
